@@ -13,37 +13,10 @@
 // limitations under the License.
 
 use std::process::Command;
-use std::env;
 
 // This build script is used to generate the rust source files that
 // we need for XDS GRPC communication.
 fn main() -> Result<(), anyhow::Error> {
-
-    // Currently, we rely on a static checked-in binary build of boringssl
-    // to support the FIPS feature due to the inevitable cert lag/old Clang variants/etc
-    //
-    // Set arch/os specific vendored paths here, based on target_arch
-    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
-    let pwd = std::env::current_dir().unwrap();
-
-    let bssl_path = "BORING_BSSL_PATH";
-    let bssl_include_path = "BORING_BSSL_INCLUDE_PATH";
-
-    let fips_warn = "You must set BORING_BSSL_PATH and BORING_BSSL_INCLUDE_PATH to point to \
-                             a valid distribution of BoringSSL for your os/arch, or disable the FIPS feature.";
-
-    match os.as_ref() {
-        "linux" => match arch.as_ref() {
-            "x86" => {
-                env::set_var(bssl_path, pwd.join("vendor/boringssl-fips/linux_x86_64").as_os_str());
-                env::set_var(bssl_include_path, pwd.join("vendor/boringssl-fips/linux_x86_64/include/").as_os_str());
-            },
-            _ => {println!("{}", fips_warn)},
-        },
-        _ => {println!("{}", fips_warn)},
-    };
-
     let proto_files = vec![
         "proto/xds.proto",
         "proto/workload.proto",

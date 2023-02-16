@@ -89,12 +89,14 @@ impl Inbound {
                 dst,
             };
             let workloads = self.workloads.clone();
+            let extensions = self.cfg.extensions.clone();
             debug!(%conn, "accepted connection");
             let enable_original_source = self.cfg.enable_original_source;
             let metrics = self.metrics.clone();
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
                     Self::serve_connect(
+                        extensions.clone(),
                         workloads.clone(),
                         conn.clone(),
                         enable_original_source.unwrap_or_default(),
@@ -142,6 +144,7 @@ impl Inbound {
 
     /// handle_inbound serves an inbound connection with a target address `addr`.
     pub(super) async fn handle_inbound(
+        ext: &crate::extensions::ExtensionManager,
         request_type: InboundConnect,
         orig_src: Option<IpAddr>,
         addr: SocketAddr,
@@ -150,7 +153,13 @@ impl Inbound {
         extra_connection_metrics: Option<ConnectionOpen>,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
-        let stream = super::freebind_connect(orig_src, addr).await;
+        let stream = ext
+            .connect(
+                orig_src,
+                addr,
+                crate::extensions::UpstreamDestination::UpstreamServer,
+            )
+            .await;
         match stream {
             Err(err) => {
                 warn!(dur=?start.elapsed(), "connection to {} failed: {}", addr, err);
@@ -158,7 +167,7 @@ impl Inbound {
             }
             Ok(stream) => {
                 let mut stream = stream;
-                stream.set_nodelay(true)?;
+                stream.as_ref().set_nodelay(true)?;
                 trace!(dur=?start.elapsed(), "connected to: {addr}");
                 tokio::task::spawn(
                     (async move {
@@ -175,7 +184,7 @@ impl Inbound {
                             DirectPath(mut incoming) => {
                                 match proxy::relay(
                                     &mut incoming,
-                                    &mut stream,
+                                    stream.as_mut(),
                                     &metrics,
                                     transferred_bytes,
                                 )
@@ -198,7 +207,7 @@ impl Inbound {
                                 Ok(mut upgraded) => {
                                     if let Err(e) = super::copy_hbone(
                                         &mut upgraded,
-                                        &mut stream,
+                                        stream.as_mut(),
                                         &metrics,
                                         transferred_bytes,
                                     )
@@ -239,6 +248,7 @@ impl Inbound {
         peer_id=%OptionDisplay(&conn.src_identity)
     ))]
     async fn serve_connect(
+        ext: crate::extensions::ExtensionManager,
         workloads: WorkloadInformation,
         conn: rbac::Connection,
         enable_original_source: bool,
@@ -322,7 +332,8 @@ impl Inbound {
                     destination_service_name: None,
                 };
                 let status_code = match Self::handle_inbound(
-                    Hbone(req),
+                    &ext,
+		    Hbone(req),
                     enable_original_source.then_some(source_ip),
                     addr,
                     metrics,

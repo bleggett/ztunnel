@@ -126,6 +126,9 @@ pub enum Error {
     #[error("tls handshake failed: {0:?}")]
     TlsHandshake(#[from] tokio_boring::HandshakeError<TcpStream>),
 
+    #[error("tls handshake failed: {0:?}")]
+    TlsHandshakeWrapped(#[from] tokio_boring::HandshakeError<crate::extensions::WrappedStream>),
+
     #[error("http handshake failed: {0}")]
     HttpHandshake(#[source] hyper::Error),
 
@@ -319,26 +322,28 @@ pub fn get_original_src_from_stream(stream: &TcpStream) -> Option<IpAddr> {
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Result<TcpStream> {
-    async fn connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Result<TcpStream> {
+pub async fn freebind_connect(
+    socket: TcpSocket,
+    local: Option<IpAddr>,
+    addr: SocketAddr,
+) -> io::Result<TcpStream> {
+    async fn connect(
+        socket: TcpSocket,
+        local: Option<IpAddr>,
+        addr: SocketAddr,
+    ) -> io::Result<TcpStream> {
         match local {
             None => {
                 trace!(dest=%addr, "no local address, connect directly");
-                Ok(TcpStream::connect(addr).await?)
+                Ok(socket.connect(addr).await?)
             }
             // TODO: Need figure out how to handle case of loadbalancing to itself.
             //       We use ztunnel addr instead, otherwise app side will be confused.
             Some(src) if src == socket::to_canonical(addr).ip() => {
                 trace!(%src, dest=%addr, "dest and source are the same, connect directly");
-                Ok(TcpStream::connect(addr).await?)
+                Ok(socket.connect(addr).await?)
             }
             Some(src) => {
-                let socket = if src.is_ipv4() {
-                    TcpSocket::new_v4()?
-                } else {
-                    TcpSocket::new_v6()?
-                };
-
                 let local_addr = SocketAddr::new(src, 0);
                 match socket::set_freebind_and_transparent(&socket) {
                     Err(err) => warn!("failed to set freebind: {:?}", err),
@@ -354,7 +359,7 @@ pub async fn freebind_connect(local: Option<IpAddr>, addr: SocketAddr) -> io::Re
         }
     }
     // Wrap the entire connect function in a timeout
-    timeout(CONNECTION_TIMEOUT, connect(local, addr))
+    timeout(CONNECTION_TIMEOUT, connect(socket, local, addr))
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e))?
 }

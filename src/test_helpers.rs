@@ -69,7 +69,7 @@ pub fn test_config_with_port_xds_addr_and_root_cert(
         stats_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         outbound_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         inbound_plaintext_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        ..config::parse_config().unwrap()
+        ..config::parse_config(None).unwrap()
     }
 }
 

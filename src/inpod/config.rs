@@ -79,14 +79,17 @@ impl InPodSocketFactory {
 
 impl crate::proxy::SocketFactory for InPodSocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<tokio::net::TcpSocket> {
+        tracing::debug!("BML: InPodSocketFactory - creating new v4");
         self.configure(tokio::net::TcpSocket::new_v4)
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<tokio::net::TcpSocket> {
+        tracing::debug!("BML: InPodSocketFactory - creating new v6");
         self.configure(tokio::net::TcpSocket::new_v6)
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+        tracing::debug!("BML: InPodSocketFactory - tcp_bind - creating new v4? {}", addr.is_ipv4());
         let std_sock = self.configure(|| std::net::TcpListener::bind(addr))?;
         std_sock.set_nonblocking(true)?;
         tokio::net::TcpListener::from_std(std_sock)
@@ -112,14 +115,17 @@ impl InPodSocketPortReuseFactory {
 
 impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
     fn new_tcp_v4(&self) -> std::io::Result<tokio::net::TcpSocket> {
+        tracing::debug!("BML: InPodSocketPortReuseFactory - creating new v4");
         self.sf.new_tcp_v4()
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<tokio::net::TcpSocket> {
+        tracing::debug!("BML: InPodSocketPortReuseFactory - creating new v6");
         self.sf.new_tcp_v6()
     }
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+        tracing::debug!("BML: InPodSocketPortReuseFactory - tcp_bind - creating new v4? {}", addr.is_ipv4());
         let sock = self.sf.configure(|| match addr {
             std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
             std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),

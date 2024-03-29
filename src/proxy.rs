@@ -437,8 +437,10 @@ pub async fn freebind_connect(
     ) -> io::Result<TcpStream> {
         let create_socket = |is_ipv4: bool| {
             if is_ipv4 {
+                debug!("BML: makin' new V4 socket");
                 socket_factory.new_tcp_v4()
             } else {
+                debug!("BML: makin' new V6 socket");
                 socket_factory.new_tcp_v6()
             }
         };
@@ -449,20 +451,20 @@ pub async fn freebind_connect(
 
         match local {
             None => {
-                let socket = create_socket(addr.is_ipv4())?;
+                let socket = create_socket(addr.ip().to_canonical().is_ipv4())?;
                 trace!(dest=%addr, "no local address, connect directly");
                 Ok(socket.connect(addr).await?)
             }
             // TODO: Need figure out how to handle case of loadbalancing to itself.
             //       We use ztunnel addr instead, otherwise app side will be confused.
             Some(src) if src == socket::to_canonical(addr).ip() => {
-                let socket = create_socket(addr.is_ipv4())?;
+                let socket = create_socket(addr.ip().to_canonical().is_ipv4())?;
                 trace!(%src, dest=%addr, "dest and source are the same, connect directly");
                 Ok(socket.connect(addr).await?)
             }
             Some(src) => {
-                let socket = create_socket(src.is_ipv4())?;
-                let local_addr = SocketAddr::new(src, 0);
+                let socket = create_socket(src.to_canonical().is_ipv4())?;
+                let local_addr = SocketAddr::new(src.to_canonical(), 0);
                 match socket::set_freebind_and_transparent(&socket) {
                     Err(err) => warn!("failed to set freebind: {:?}", err),
                     _ => {

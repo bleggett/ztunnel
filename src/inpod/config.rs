@@ -14,6 +14,7 @@
 
 use crate::config;
 use std::sync::Arc;
+use tracing::debug;
 
 use super::netns::InpodNetns;
 
@@ -69,7 +70,6 @@ impl InPodSocketFactory {
         f: F,
     ) -> std::io::Result<S> {
         let socket = self.netns.run(f)??;
-
         if let Some(mark) = self.mark {
             crate::socket::set_mark(&socket, mark.into())?;
         }
@@ -121,14 +121,20 @@ impl crate::proxy::SocketFactory for InPodSocketPortReuseFactory {
 
     fn tcp_bind(&self, addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
         let sock = self.sf.configure(|| match addr {
-            std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
-            std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+            std::net::SocketAddr::V4(_) => {
+                tracing::debug!("BML: tcp-bind new V4 sock");
+                tokio::net::TcpSocket::new_v4()
+            }
+            std::net::SocketAddr::V6(_) => {
+                tracing::debug!("BML: tcp-bind new V6 sock");
+                tokio::net::TcpSocket::new_v6()
+            }
         })?;
 
         if let Err(e) = sock.set_reuseport(true) {
             tracing::warn!("setting set_reuseport failed: {} addr: {}", e, addr);
         }
-
+        debug!("BML: tcp-bind sock: {:#?}", sock);
         sock.bind(addr)?;
         sock.listen(128)
     }

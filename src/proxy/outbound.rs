@@ -88,11 +88,13 @@ impl Outbound {
                         let span = info_span!("outbound", id=%oc.id);
                         tokio::spawn(
                             (async move {
+                                debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "BML: outbound spawn START");
                                 let res = oc.proxy(stream).await;
                                 match res {
                                     Ok(_) => info!(dur=?start_outbound_instant.elapsed(), "complete"),
                                     Err(e) => warn!(dur=?start_outbound_instant.elapsed(), err=%e, "failed")
                                 };
+                                debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "BML: outbound spawn DONE");
                             })
                             .instrument(span),
                         );
@@ -277,6 +279,7 @@ impl OutboundConnection {
                     let builder = builder
                         .initial_stream_window_size(self.pi.cfg.window_size)
                         .max_frame_size(self.pi.cfg.frame_size)
+                        // .keep_alive_interval(Duration::from_secs(15))
                         .initial_connection_window_size(self.pi.cfg.connection_window_size);
 
                     let local = self
@@ -288,6 +291,7 @@ impl OutboundConnection {
                     let id = &req.source.identity();
                     let cert = self.pi.cert_manager.fetch_certificate(id).await?;
                     let connector = cert.outbound_connector(dst_identity)?;
+                    debug!("BML: outbound HBONE freebind triggered (new conn/no pool)");
                     let tcp_stream = super::freebind_connect(
                         local,
                         req.gateway,
@@ -326,14 +330,20 @@ impl OutboundConnection {
                     .body(Empty::<Bytes>::new())
                     .expect("builder with known status code should not fail");
 
+                debug!("BML: outbound - existing connection SEND START");
                 let response = connection.send_request(request).await?;
+                debug!("BML: outbound - existing connection SEND END");
 
                 let code = response.status();
                 if code != 200 {
                     return Err(Error::HttpStatus(code));
                 }
-                let mut upgraded = hyper::upgrade::on(response).await?;
 
+                debug!("BML: outbound - existing connection UPGRADE START");
+                let mut upgraded = hyper::upgrade::on(response).await?;
+                debug!("BML: outbound - existing connection UPGRADE END");
+
+                debug!("BML: outbound - existing connection HBONE COPY START");
                 super::copy_hbone(
                     &mut upgraded,
                     &mut stream,
@@ -342,6 +352,10 @@ impl OutboundConnection {
                 )
                 .instrument(trace_span!("hbone client"))
                 .await
+                .map(|_| {
+                    debug!("BML: outbound HBONE connection dropped");
+                    notify_cancel.notify_one()
+                })
             }
             Protocol::TCP => {
                 info!(

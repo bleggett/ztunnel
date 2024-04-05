@@ -24,7 +24,7 @@ use rand::Rng;
 
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::time::timeout;
-use tracing::{error, trace, warn, Instrument};
+use tracing::{debug, error, trace, warn, Instrument};
 
 use inbound::Inbound;
 pub use metrics::*;
@@ -67,10 +67,12 @@ pub struct DefaultSocketFactory;
 
 impl SocketFactory for DefaultSocketFactory {
     fn new_tcp_v4(&self) -> std::io::Result<TcpSocket> {
+        debug!("BML: DefaultSocketFactory makin' new V4 socket");
         TcpSocket::new_v4()
     }
 
     fn new_tcp_v6(&self) -> std::io::Result<TcpSocket> {
+        debug!("BML: DefaultSocketFactory makin' new V6 socket");
         TcpSocket::new_v6()
     }
 
@@ -301,7 +303,7 @@ pub async fn copy_hbone(
 
     tokio::try_join!(client_to_server, server_to_client)?;
 
-    trace!(sent, recv = received, "copy hbone complete");
+    debug!(sent, recv = received, "copy hbone complete");
     metrics
         .as_ref()
         .record(&transferred_bytes, (sent, received));
@@ -461,8 +463,10 @@ pub async fn freebind_connect(
     ) -> io::Result<TcpStream> {
         let create_socket = |is_ipv4: bool| {
             if is_ipv4 {
+                debug!("BML: makin' new V4 socket");
                 socket_factory.new_tcp_v4()
             } else {
+                debug!("BML: makin' new V6 socket");
                 socket_factory.new_tcp_v6()
             }
         };
@@ -473,20 +477,24 @@ pub async fn freebind_connect(
 
         match local {
             None => {
-                let socket = create_socket(addr.is_ipv4())?;
-                trace!(dest=%addr, "no local address, connect directly");
+                let socket = create_socket(addr.ip().to_canonical().is_ipv4())?;
+                debug!(dest=%addr, "BML: no local address, connect directly");
+                debug!("BML: local sock: {:#?}", socket);
                 Ok(socket.connect(addr).await?)
             }
             // TODO: Need figure out how to handle case of loadbalancing to itself.
             //       We use ztunnel addr instead, otherwise app side will be confused.
             Some(src) if src == socket::to_canonical(addr).ip() => {
-                let socket = create_socket(addr.is_ipv4())?;
-                trace!(%src, dest=%addr, "dest and source are the same, connect directly");
+                let socket = create_socket(addr.ip().to_canonical().is_ipv4())?;
+                debug!(%src, dest=%addr, "BML: dest and source are the same, connect directly");
+                debug!("BML: direct sock: {:#?}", socket);
                 Ok(socket.connect(addr).await?)
             }
             Some(src) => {
-                let socket = create_socket(src.is_ipv4())?;
-                let local_addr = SocketAddr::new(src, 0);
+                let socket = create_socket(src.to_canonical().is_ipv4())?;
+                let local_addr = SocketAddr::new(src.to_canonical(), 0);
+                debug!(%src, %local_addr, %addr, "BML: freebind!");
+                debug!("BML: freebind sock: {:#?}", socket);
                 match socket::set_freebind_and_transparent(&socket) {
                     Err(err) => warn!("failed to set freebind: {:?}", err),
                     _ => {

@@ -181,7 +181,9 @@ impl Inbound {
         rbac_ctx: crate::state::ProxyRbacContext,
     ) -> Result<(), std::io::Error> {
         let start = Instant::now();
+        debug!("BML: inbound freebind triggered");
         let out_stream = super::freebind_connect(orig_src, addr, socket_factory).await;
+        debug!("BML: inbound freebind done");
         match out_stream {
             Err(err) => {
                 warn!(dur=?start.elapsed(), "connection to {} failed: {}", addr, err);
@@ -212,6 +214,7 @@ impl Inbound {
                             metrics::BytesTransferred::from(&connection_metrics);
                         match request_type {
                             DirectPath(mut incoming) => {
+                                debug!(dur=?start.elapsed(), "BML: DirectPath connected to: {addr}");
                                 let res = tokio::select! {
                                 r = proxy::relay(
                                     &mut incoming,
@@ -240,6 +243,7 @@ impl Inbound {
                             }
                             Hbone(req) => match hyper::upgrade::on(req).await {
                                 Ok(mut upgraded) => {
+                                    debug!(dur=?start.elapsed(), "BML: Hbone upgrade, connected to: {addr}");
                                     let res = tokio::select! {
                                         r =  super::copy_hbone(
                                         &mut upgraded,
@@ -324,6 +328,7 @@ impl Inbound {
         match req.method() {
             &Method::CONNECT => {
                 let uri = req.uri();
+                debug!("BML: fired serve_connect");
                 info!("got {} request to {}", req.method(), uri);
                 let hbone_addr: SocketAddr = match uri.to_string().as_str().parse() {
                     Ok(parsed) => parsed,
@@ -471,6 +476,7 @@ impl Inbound {
                     Err(_) => StatusCode::SERVICE_UNAVAILABLE,
                 };
 
+                debug!("BML: serve_connect done");
                 Ok(Response::builder()
                     .status(status_code)
                     .body(Empty::new())

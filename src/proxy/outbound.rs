@@ -354,7 +354,6 @@ impl OutboundConnection {
                 .await
                 .map(|_| {
                     debug!("BML: outbound HBONE connection dropped");
-                    notify_cancel.notify_one()
                 })
             }
             Protocol::TCP => {

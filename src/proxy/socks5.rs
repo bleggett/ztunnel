@@ -57,10 +57,12 @@ impl Socks5 {
     }
 
     pub async fn run(self) {
+        let (out_drain_signal, out_drain) = drain::channel();
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
+                let inner_drain = out_drain.clone();
                 match socket {
                     Ok((stream, remote)) => {
                         info!("accepted outbound connection from {}", remote);
@@ -69,7 +71,7 @@ impl Socks5 {
                             id: TraceParent::new(),
                         };
                         tokio::spawn(async move {
-                            if let Err(err) = handle(oc, stream).await {
+                            if let Err(err) = handle(oc, stream, inner_drain).await {
                                 log::error!("handshake error: {}", err);
                             }
                         });
@@ -87,6 +89,7 @@ impl Socks5 {
         tokio::select! {
             res = accept => { res }
             _ = self.drain.signaled() => {
+                out_drain_signal.drain().await;
                 info!("socks5 drained");
             }
         }
@@ -97,7 +100,7 @@ impl Socks5 {
 // sufficient to integrate with common clients:
 // - only unauthenticated requests
 // - only CONNECT, with IPv4 or IPv6
-async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(), anyhow::Error> {
+async fn handle(mut oc: OutboundConnection, mut stream: TcpStream, out_drain: Watch) -> Result<(), anyhow::Error> {
     // Version(5), Number of auth methods
     let mut version = [0u8; 2];
     stream.read_exact(&mut version).await?;
@@ -190,11 +193,18 @@ async fn handle(mut oc: OutboundConnection, mut stream: TcpStream) -> Result<(),
 
     info!("accepted connection from {remote_addr} to {host}");
     tokio::spawn(async move {
-        let res = oc.proxy_to(stream, remote_addr, host, true).await;
-        match res {
-            Ok(_) => {}
-            Err(ref e) => warn!("outbound proxy failed: {}", e),
-        };
+        let outer_conn_drain = out_drain.clone();
+        tokio::select! {
+                _ = out_drain.signaled() => {
+                    info!("socks drain signaled");
+                }
+                res = oc.proxy_to(stream, remote_addr, host, true, outer_conn_drain) => {
+                    match res {
+                        Ok(_) => {}
+                        Err(ref e) => warn!("outbound proxy failed: {}", e),
+                    };
+                }
+        }
     });
     Ok(())
 }

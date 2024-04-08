@@ -15,15 +15,19 @@
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
-use std::time::Instant;
+use std::time::{Instant};
 
 use bytes::Bytes;
 use drain::Watch;
 use http_body_util::Empty;
 use hyper::header::FORWARDED;
 use hyper::StatusCode;
+use hyper::client::conn::http2;
+
+
 
 use tokio::net::{TcpListener, TcpStream};
+
 
 use tracing::{debug, error, info, info_span, trace, trace_span, warn, Instrument};
 
@@ -74,11 +78,19 @@ impl Outbound {
     }
 
     pub(super) async fn run(self) {
+        // Since we are spawning autonomous tasks to handle outbound connections for a single workload,
+        // we can have situations where the workload is deleted, but a task is still "stuck"
+        // waiting for a server response stream on a HTTP/2 connection or whatnot.
+        //
+        // So use a drain to nuke tasks that might be stuck sending.
+        let (sub_drain_signal, sub_drain) = drain::channel();
         let accept = async move {
             loop {
                 // Asynchronously wait for an inbound socket.
                 let socket = self.listener.accept().await;
                 let start_outbound_instant = Instant::now();
+                let outbound_drain = sub_drain.clone();
+                let outer_conn_drain = sub_drain.clone();
                 match socket {
                     Ok((stream, _remote)) => {
                         let mut oc = OutboundConnection {
@@ -89,12 +101,25 @@ impl Outbound {
                         tokio::spawn(
                             (async move {
                                 debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "BML: outbound spawn START");
-                                let res = oc.proxy(stream).await;
-                                match res {
-                                    Ok(_) => info!(dur=?start_outbound_instant.elapsed(), "complete"),
-                                    Err(e) => warn!(dur=?start_outbound_instant.elapsed(), err=%e, "failed")
-                                };
+                                // Since this task is spawned, make sure we are guaranteed to terminate
+                                tokio::select! {
+                                        _ = outbound_drain.signaled() => {
+                                            debug!("outbound drain signaled");
+                                        }
+                                        res = oc.proxy(stream, outer_conn_drain.clone()) => {
+                                            match res {
+                                                Ok(_) => info!(dur=?start_outbound_instant.elapsed(), "complete"),
+                                                Err(e) => warn!(dur=?start_outbound_instant.elapsed(), err=%e, "failed")
+                                            };
+                                        }
+                                }
                                 debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "BML: outbound spawn DONE");
+                                // let res = oc.proxy(stream, inner_drain).await;
+                                // match res {
+                                //     Ok(_) => info!(dur=?start_outbound_instant.elapsed(), "complete"),
+                                //     Err(e) => warn!(dur=?start_outbound_instant.elapsed(), err=%e, "failed")
+                                // };
+                                // debug!(dur=?start_outbound_instant.elapsed(), id=%oc.id, "BML: outbound spawn DONE");
                             })
                             .instrument(span),
                         );
@@ -115,6 +140,8 @@ impl Outbound {
         tokio::select! {
             res = accept => { res }
             _ = self.drain.signaled() => {
+                debug!("outbound drained, dropping any outbound connections");
+                sub_drain_signal.drain().await;
                 info!("outbound drained");
             }
         }
@@ -127,10 +154,10 @@ pub(super) struct OutboundConnection {
 }
 
 impl OutboundConnection {
-    async fn proxy(&mut self, stream: TcpStream) -> Result<(), Error> {
+    async fn proxy(&mut self, stream: TcpStream, outer_conn_drain: Watch) -> Result<(), Error> {
         let peer = socket::to_canonical(stream.peer_addr().expect("must receive peer addr"));
         let orig_dst_addr = socket::orig_dst_addr_or_default(&stream);
-        self.proxy_to(stream, peer, orig_dst_addr, false).await
+        self.proxy_to(stream, peer, orig_dst_addr, false, outer_conn_drain).await
     }
 
     pub async fn proxy_to(
@@ -139,6 +166,7 @@ impl OutboundConnection {
         remote_addr: SocketAddr,
         orig_dst_addr: SocketAddr,
         block_passthrough: bool,
+        outer_conn_drain: Watch,
     ) -> Result<(), Error> {
         if self.pi.cfg.proxy_mode == ProxyMode::Shared
             && Some(orig_dst_addr.ip()) == self.pi.cfg.local_ip
@@ -275,11 +303,10 @@ impl OutboundConnection {
                 // in the pool.
                 let connect = async {
                     let mut builder =
-                        hyper::client::conn::http2::Builder::new(hyper_util::TokioExecutor);
+                        http2::Builder::new(hyper_util::TokioExecutor);
                     let builder = builder
                         .initial_stream_window_size(self.pi.cfg.window_size)
                         .max_frame_size(self.pi.cfg.frame_size)
-                        // .keep_alive_interval(Duration::from_secs(15))
                         .initial_connection_window_size(self.pi.cfg.connection_window_size);
 
                     let local = self
@@ -300,17 +327,25 @@ impl OutboundConnection {
                     .await?;
                     tcp_stream.set_nodelay(true)?; // TODO: this is backwards of expectations
                     let tls_stream = connector.connect(tcp_stream).await?;
+
                     let (request_sender, connection) = builder
                         .handshake(::hyper_util::rt::TokioIo::new(tls_stream))
                         .await
                         .map_err(Error::HttpHandshake)?;
+
                     // spawn a task to poll the connection and drive the HTTP state
                     tokio::spawn(async move {
-                        if let Err(e) = connection.await {
-                            error!("Error in HBONE connection handshake: {:?}", e);
+                        tokio::select! {
+                                _ = outer_conn_drain.signaled() => {
+                                    debug!("BML: notified conn, dropping");
+                                    return
+                                }
+                                res = connection=> {
+                                    error!("Done with HBONE connection handshake: {:?}", res);
+                                }
                         }
                     });
-                    Ok(request_sender)
+                    Ok::<http2::SendRequest<Empty<Bytes>>, Error>(request_sender)
                 };
                 let mut connection = self.pi.pool.connect(pool_key.clone(), connect).await?;
 
@@ -331,6 +366,9 @@ impl OutboundConnection {
                     .expect("builder with known status code should not fail");
 
                 debug!("BML: outbound - existing connection SEND START");
+                // There are scenarios (upstream hangup, etc) where this "send" will simply get stuck.
+                // As in, stream processing deadlocks, and `send_request` never resolves to anything.
+                // Probably related to https://github.com/hyperium/hyper/issues/3623
                 let response = connection.send_request(request).await?;
                 debug!("BML: outbound - existing connection SEND END");
 

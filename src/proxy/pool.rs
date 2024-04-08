@@ -28,6 +28,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tracing::debug;
 
+
+
+
 use crate::identity::Identity;
 use crate::proxy::Error;
 
@@ -41,7 +44,7 @@ impl Pool {
         Self {
             pool: HyperPool::new(
                 hyper_util::client::legacy::pool::Config {
-                    idle_timeout: Some(Duration::from_secs(90)),
+                    idle_timeout: Some(Duration::from_secs(30)),
                     max_idle_per_host: (std::usize::MAX),
                 },
                 TokioExec,
@@ -121,7 +124,8 @@ impl Pool {
                 // Return an error so
                 return Err(Error::PoolAlreadyConnecting);
             };
-            let pc = Client(connect.await?);
+            let connected = connect.await?;
+            let pc = Client(connected);
             let pooled = self.pool.pooled(connecting, pc);
             Ok::<_, Error>(pooled)
         };
